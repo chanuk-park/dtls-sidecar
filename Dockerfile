@@ -22,7 +22,7 @@ FROM debian:bookworm-slim
 # pod's network namespace, iproute2 for diagnosis. Nothing else: the sidecar needs no access
 # to anything of the network function's.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libnetfilter-queue1 iptables iproute2 \
+ && apt-get install -y --no-install-recommends libnetfilter-queue1 iptables iproute2 conntrack \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/n4dtls /usr/local/bin/n4dtls
 

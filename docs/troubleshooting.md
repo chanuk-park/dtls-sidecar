@@ -38,6 +38,22 @@ Run an agent matching your `spire-api-sdk` (1.11.x with sdk v1.11.2).
 
 ## Datapath
 
+**One direction flows, the other does not: `captured` climbs on one sidecar, stays 0 on the
+other, and plaintext PFCP is still on the wire**
+Stale conntrack. nat rules run only for the first packet of a connection, and the redirect
+rules are installed *after* the DTLS session is up, so an NF that was already talking has an
+ASSURED conntrack entry for the N4 flow. Its replies count as that flow's reply direction,
+skip nat OUTPUT entirely, and leave unencrypted -- while the request direction looks healthy.
+NOTRACK does not fix this: it governs new packets, not state that already exists. The
+sidecar flushes conntrack for the intercepted port after installing its rules; if
+`conntrack` is missing from the image it says so loudly. Confirm with:
+
+```sh
+conntrack -L -p udp 2>/dev/null | grep 8805      # should be empty or freshly created
+iptables -t nat -L OUTPUT -v -n | grep REDIRECT  # counters must be non-zero on BOTH sides
+```
+
+
 **Packets are tunneled and injected but never reach the peer NF**
 `rp_filter`. The effective value is `max(conf/all, conf/<iface>)`, so setting only the tun's
 knob does nothing under a strict `conf/all`, and loose mode (2) is also insufficient. Both

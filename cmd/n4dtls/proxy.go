@@ -40,6 +40,7 @@ import (
 	"net"
 	"net/netip"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -178,7 +179,46 @@ func installRedirectRules(dport, toPort int) error {
 		}
 		logf("installed iptables %v", r)
 	}
+	flushConntrack(dport)
 	return nil
+}
+
+// flushConntrack drops existing conntrack state for the intercepted port.
+//
+// nat rules run only for the first packet of a connection. The rules above are installed
+// AFTER the DTLS session is up -- deliberately, so the NF's traffic is never queued with
+// nowhere to go -- but by then the NF has usually been talking for a while and conntrack
+// holds an ASSURED entry for the N4 flow. The NF's replies are then classified as that
+// flow's reply direction, skip nat OUTPUT entirely, and leave UNENCRYPTED by the direct
+// route while the sidecar's counters show only one direction moving.
+//
+// NOTRACK on our own delivery does not help here: it applies to packets from now on, not to
+// state that already exists. The existing entries have to go.
+//
+// A failure here is loud on purpose. The symptom is silent plaintext on the wire, which is
+// exactly the thing this sidecar exists to prevent, so it must not look like success.
+func flushConntrack(dport int) {
+	p := fmt.Sprintf("%d", dport)
+	ok := false
+	for _, args := range [][]string{
+		{"-D", "-p", "udp", "--orig-port-dst", p},
+		{"-D", "-p", "udp", "--orig-port-src", p},
+	} {
+		out, err := exec.Command("conntrack", args...).CombinedOutput()
+		// conntrack -D exits non-zero when it deletes nothing, which is fine.
+		if err == nil || strings.Contains(string(out), "deleted") || strings.Contains(string(out), "0 flow entries") {
+			ok = true
+			continue
+		}
+		logf("WARN conntrack %v: %v (%s)", args, err, strings.TrimSpace(string(out)))
+	}
+	if ok {
+		logf("flushed conntrack for udp/%s so replies are re-evaluated by the new rules", p)
+		return
+	}
+	logf("WARN could not flush conntrack (is conntrack-tools installed?). Pre-existing flows "+
+		"will bypass the redirect and the NF's replies will leave IN PLAINTEXT -- check that "+
+		"both sidecars report captured>0 in each direction.")
 }
 
 func removeRedirectRules(dport, toPort int) {

@@ -75,7 +75,17 @@ gv() { echo "$1" | grep -oE "$2=[0-9]+" | cut -d= -f2; }
 ss=$(gv "$SC" sent); sr=$(gv "$SC" recv); us=$(gv "$UC" sent); ur=$(gv "$UC" recv)
 echo "     smf: $SC"; echo "     upf: $UC"
 [ "${ss:-0}" -gt 0 ] && [ "${ur:-0}" -gt 0 ] && ok "SMF->UPF flowing (sent=$ss recv=$ur)" || bad "SMF->UPF not flowing"
-[ "${us:-0}" -gt 0 ] && [ "${sr:-0}" -gt 0 ] && ok "UPF->SMF flowing (sent=$us recv=$sr)" || bad "UPF->SMF not flowing (responses may be leaking in plaintext)"
+if [ "${us:-0}" -gt 0 ] && [ "${sr:-0}" -gt 0 ]; then
+  ok "UPF->SMF flowing (sent=$us recv=$sr)"
+else
+  bad "UPF->SMF not flowing -- responses are leaking in PLAINTEXT"
+  if [ "${ss:-0}" -gt 0 ]; then
+    echo "     one direction only: the usual cause is conntrack state that predates the"
+    echo "     redirect rules, so the NF's replies skip nat OUTPUT. Check on the UPF node:"
+    echo "       conntrack -L -p udp | grep $DPORT"
+    echo "       iptables -t nat -L OUTPUT -v -n | grep REDIRECT   # counters must be non-zero"
+  fi
+fi
 
 echo "== 4. PFCP association survived =="
 # With a sidecar injected the pod has two containers, so the NF's own container has to be
