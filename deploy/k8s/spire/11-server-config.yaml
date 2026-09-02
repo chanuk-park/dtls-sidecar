@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-server
+  namespace: spire
+data:
+  server.conf: |
+    server {
+      bind_address = "0.0.0.0"
+      bind_port = "8081"
+      socket_path = "/run/spire/sockets/server.sock"
+      trust_domain = "5gc.example.com"
+      data_dir = "/run/spire/data"
+      log_level = "INFO"
+      ca_ttl = "24h"
+      default_x509_svid_ttl = "1h"
+    }
+    plugins {
+      DataStore "sql" {
+        plugin_data {
+          database_type = "sqlite3"
+          connection_string = "/run/spire/data/datastore.sqlite3"
+        }
+      }
+      KeyManager "disk" { plugin_data { keys_path = "/run/spire/data/keys.json" } }
+      # Agents authenticate with a projected service-account token: no join tokens, so an
+      # agent restart re-attests by itself instead of burning a single-use secret.
+      NodeAttestor "k8s_psat" {
+        plugin_data {
+          clusters = {
+            "cluster" = {
+              service_account_allow_list = ["spire:spire-agent"]
+            }
+          }
+        }
+      }
+    }
+    health_checks {
+      listener_enabled = true
+      bind_address = "0.0.0.0"
+      bind_port = "8080"
+      live_path = "/live"
+      ready_path = "/ready"
+    }

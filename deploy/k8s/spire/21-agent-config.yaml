@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-agent
+  namespace: spire
+data:
+  agent.conf: |
+    agent {
+      data_dir = "/run/spire"
+      log_level = "INFO"
+      server_address = "spire-server.spire.svc.cluster.local"
+      server_port = "8081"
+      socket_path = "/run/spire/sockets/agent.sock"
+      trust_domain = "5gc.example.com"
+      # Trust is bootstrapped from the bundle the server publishes; see the bundle
+      # ConfigMap created by the registrar Job.
+      trust_bundle_path = "/run/spire/bundle/bundle.crt"
+    }
+    plugins {
+      # Keys on disk so a restarted agent recovers its SVID instead of re-attesting.
+      KeyManager "disk" { plugin_data { directory = "/run/spire" } }
+      NodeAttestor "k8s_psat" { plugin_data { cluster = "cluster" } }
+      # Resolves a workload's pid to its pod: namespace, service account, container name.
+      WorkloadAttestor "k8s" { plugin_data { skip_kubelet_verification = true } }
+      # unix selectors (path, sha256) are useful for workloads outside a pod.
+      WorkloadAttestor "unix" { plugin_data { discover_workload_path = true } }
+    }

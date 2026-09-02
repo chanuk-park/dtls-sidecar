@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: spire-agent
+  namespace: spire
+spec:
+  selector: {matchLabels: {app: spire-agent}}
+  template:
+    metadata:
+      labels: {app: spire-agent}
+    spec:
+      serviceAccountName: spire-agent
+      hostPID: true       # the workload attestor resolves caller pids
+      hostNetwork: true   # it talks to the kubelet on this node
+      dnsPolicy: ClusterFirstWithHostNet
+      initContainers:
+        # Wait for the trust bundle the registrar publishes, so the agent does not
+        # crash-loop before the server is ready.
+        - name: wait-bundle
+          image: busybox:1.36
+          command: ["sh", "-c", "until [ -s /run/spire/bundle/bundle.crt ]; do sleep 2; done"]
+          volumeMounts: [{name: bundle, mountPath: /run/spire/bundle}]
+      containers:
+        - name: spire-agent
+          image: ghcr.io/spiffe/spire-agent:1.11.2
+          args: ["-config", "/run/spire/config/agent.conf"]
+          securityContext:
+            privileged: true   # read other pids' cgroups for attestation
+          volumeMounts:
+            - {name: config, mountPath: /run/spire/config, readOnly: true}
+            - {name: bundle, mountPath: /run/spire/bundle, readOnly: true}
+            - {name: sockets, mountPath: /run/spire/sockets}
+            - {name: data, mountPath: /run/spire}
+      volumes:
+        - {name: config, configMap: {name: spire-agent}}
+        - {name: bundle, configMap: {name: spire-bundle, optional: true}}
+        # The Workload API socket must be reachable from the NF pods, which mount this
+        # same host path. hostPath is what makes one agent per node serve every pod on it.
+        - {name: sockets, hostPath: {path: /run/spire/sockets, type: DirectoryOrCreate}}
+        - {name: data, hostPath: {path: /var/lib/spire-agent, type: DirectoryOrCreate}}

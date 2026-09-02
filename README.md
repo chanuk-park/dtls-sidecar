@@ -53,29 +53,31 @@ NF binary. Use `host + delegated` when the pod spec must not change at all.
 
 ## Quickstart
 
+The sidecar runs as a **container in the SMF and UPF pods**, and SPIRE runs in the cluster.
+
 ```sh
-# 0. build
-CGO_ENABLED=1 go build -o n4dtls ./cmd/n4dtls        # needs libnetfilter_queue-dev
+# 1. build and make the image available to every node that runs an NF
+docker build -t ghcr.io/chanuk-park/dtls-sidecar:latest .
 
-# 1. SPIRE server + per-node agents + one identity per NF
-./deploy/spire-bootstrap.sh --smf-node <ip> --upf-node <ip>
+# 2. SPIRE in-cluster: server (StatefulSet) + agent (DaemonSet) + one identity per NF
+#    edit deploy/k8s/spire/13-registrar-config.yaml for your namespace/service accounts
+kubectl apply -f deploy/k8s/spire/
 
-# 2a. in-pod (default): add the sidecar container to the SMF/UPF Deployments
-docker build -t cirrus/n4dtls:armb deploy/image   # after copying ./n4dtls into deploy/image/
-./deploy/n4dtls-inject.sh up
+# 3. add the sidecar to the network functions -- UPF first (it listens), then SMF (it dials)
+#    edit the two patches for your addresses and trust domain
+kubectl -n core patch deploy oai-upf --patch-file deploy/k8s/sidecar/upf-patch.yaml
+kubectl -n core patch deploy oai-smf --patch-file deploy/k8s/sidecar/smf-patch.yaml
 
-# 2b. or host sidecar (no pod spec change)
-./deploy/spire-bootstrap.sh --smf-node <ip> --upf-node <ip> --host-sidecar
-./deploy/n4dtls-deploy.sh up
-
-# 3. check it
-./deploy/n4dtls-verify.sh          # 11 checks, PASS/FAIL each, exit 0 only if all pass
-
-# 4. remove
-./deploy/n4dtls-inject.sh down     # or ./deploy/n4dtls-deploy.sh down
+# 4. check it
+kubectl -n core logs deploy/oai-smf -c n4dtls | grep ARMB-STATE
+./deploy/n4dtls-verify.sh          # 11 checks, exit 0 only if all pass
 ```
 
-`deploy/README.md` documents every script and flag. `docs/design.md` explains how capture,
+`deploy/k8s/README.md` is the full guide. If the pod spec must not change at all, there is a
+host-sidecar variant driven by shell scripts — see `deploy/README.md`.
+
+`deploy/k8s/README.md` covers the Kubernetes deployment; `deploy/README.md` documents the
+script-driven host variant. `docs/design.md` explains how capture,
 encapsulation and reinjection work and why each choice was made. `docs/troubleshooting.md`
 lists the failure modes that are easy to hit and how to recognise them.
 

@@ -1,0 +1,37 @@
+# Adds the n4dtls sidecar to the UPF Deployment. The NF container is not listed here and is
+# therefore untouched: same image, same config, same command.
+#
+#   kubectl -n core patch deploy <upf> --patch-file deploy/k8s/sidecar/smf-patch.yaml
+#
+# The UPF side only listens; the SMF side dials it. Apply this one FIRST.
+spec:
+  template:
+    spec:
+      containers:
+        - name: n4dtls
+          image: ghcr.io/chanuk-park/dtls-sidecar:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - -role=server
+            - -listen=0.0.0.0:8806
+            - -peer-id=spiffe://5gc.example.com/ns/core/nf/smf
+            - -identity=spiffe://5gc.example.com/ns/core/nf/upf
+            - -nfqueue=61
+            - -tun=n4dtls0
+            - -install-nfq-rule
+            - -dport=8805
+            - -mtu=1200
+          env:
+            - name: CIRRUS_SPIRE_SOCKET
+              value: unix:///run/spire/sockets/agent.sock
+          securityContext:
+            privileged: true
+            capabilities: {add: ["NET_ADMIN", "NET_RAW"]}
+          volumeMounts:
+            - {name: spire-agent-socket, mountPath: /run/spire/sockets, readOnly: true}
+            - {name: dev-net-tun, mountPath: /dev/net/tun}
+      volumes:
+        - name: spire-agent-socket
+          hostPath: {path: /run/spire/sockets, type: Directory}
+        - name: dev-net-tun
+          hostPath: {path: /dev/net/tun, type: CharDevice}

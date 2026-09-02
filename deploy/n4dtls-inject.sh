@@ -13,7 +13,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 NS="core"; MTU=1200; SMF_D=""; UPF_D=""
-IMAGE="${N4DTLS_IMAGE:-cirrus/n4dtls:armb}"
+IMAGE="${N4DTLS_IMAGE:-ghcr.io/chanuk-park/dtls-sidecar:latest}"
 SIDECAR="n4dtls"
 DTLS_PORT=8806; DPORT=8805; SMF_Q=62; UPF_Q=61
 

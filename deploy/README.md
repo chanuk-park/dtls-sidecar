@@ -1,4 +1,11 @@
-# Deploying n4dtls
+# Deploying n4dtls (script-driven variants)
+
+> **For Kubernetes, use `deploy/k8s/`** — SPIRE as a StatefulSet/DaemonSet and the sidecar
+> added to the SMF/UPF pods by manifest. See `deploy/k8s/README.md`.
+>
+> The scripts here are the alternative for when SPIRE must run on the nodes rather than in
+> the cluster, or when the NF pod spec must not change at all (`--host-sidecar`).
+
 
 Four scripts. They discover the deployment themselves — pod names, host nodes, container
 PIDs, the UPF's N4 address — so nothing here is tied to one cluster.
@@ -60,10 +67,9 @@ only the pod gains a second container, which shares the pod's network namespace 
 Build the image first:
 
 ```sh
-CGO_ENABLED=1 go build -o deploy/image/n4dtls ./cmd/n4dtls
-docker build -t cirrus/n4dtls:armb deploy/image
+docker build -t ghcr.io/chanuk-park/dtls-sidecar:latest .
 # make it available to the kubelet on every NF node, e.g. for k3s:
-docker save cirrus/n4dtls:armb -o /tmp/n4dtls.tar && sudo k3s ctr images import /tmp/n4dtls.tar
+docker save ghcr.io/chanuk-park/dtls-sidecar:latest -o /tmp/n4dtls.tar && sudo k3s ctr images import /tmp/n4dtls.tar
 ```
 
 Override the image with `N4DTLS_IMAGE`.

@@ -1,0 +1,102 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: spire-server
+  namespace: spire
+spec:
+  selector: {app: spire-server}
+  ports:
+    - name: grpc
+      port: 8081
+      targetPort: 8081
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: spire-server
+  namespace: spire
+spec:
+  serviceName: spire-server
+  replicas: 1
+  selector: {matchLabels: {app: spire-server}}
+  template:
+    metadata:
+      labels: {app: spire-server}
+    spec:
+      serviceAccountName: spire-server
+      containers:
+        - name: spire-server
+          image: ghcr.io/spiffe/spire-server:1.11.2
+          args: ["-config", "/run/spire/config/server.conf"]
+          ports: [{containerPort: 8081}]
+          livenessProbe:
+            httpGet: {path: /live, port: 8080}
+            initialDelaySeconds: 15
+          readinessProbe:
+            httpGet: {path: /ready, port: 8080}
+            initialDelaySeconds: 5
+          volumeMounts:
+            - {name: config, mountPath: /run/spire/config, readOnly: true}
+            - {name: data, mountPath: /run/spire/data}
+            - {name: sockets, mountPath: /run/spire/sockets}
+        # Creates the per-NF registration entries and publishes the trust bundle. It lives in
+        # the server pod so it can share the server's socket (an emptyDir cannot be shared
+        # across pods), and it re-runs on every restart, which is how a config change is
+        # applied: entry create reports a duplicate and moves on.
+        - name: registrar
+          image: ghcr.io/spiffe/spire-server:1.11.2
+          envFrom: [{configMapRef: {name: spire-registrar}}]
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              S=/run/spire/sockets/server.sock
+              until /opt/spire/bin/spire-server healthcheck -socketPath $S >/dev/null 2>&1; do sleep 2; done
+              # One identity per network function, selected on the POD the sidecar runs in:
+              # namespace, service account and container name. A process elsewhere on the
+              # node cannot satisfy these by running a copy of the NF binary.
+              entry() { # $1=nf name  $2=service account
+                /opt/spire/bin/spire-server entry create -socketPath $S \
+                  -parentID "spiffe://${TRUST_DOMAIN}/spire/agent/k8s_psat/cluster" \
+                  -spiffeID "spiffe://${TRUST_DOMAIN}/ns/${NF_NAMESPACE}/nf/$1" \
+                  -selector "k8s:ns:${NF_NAMESPACE}" \
+                  -selector "k8s:sa:$2" \
+                  -selector "k8s:container-name:${SIDECAR_CONTAINER}" \
+                  -x509SVIDTTL 3600 2>&1 | sed "s/^/[$1] /" || true
+              }
+              entry smf "$SMF_SERVICE_ACCOUNT"
+              entry upf "$UPF_SERVICE_ACCOUNT"
+              # Keep the bundle file fresh for the publisher beside us.
+              while :; do
+                /opt/spire/bin/spire-server bundle show -socketPath $S > /run/spire/bundle/bundle.crt 2>/dev/null || true
+                sleep 60
+              done
+          volumeMounts:
+            - {name: sockets, mountPath: /run/spire/sockets}
+            - {name: bundle, mountPath: /run/spire/bundle}
+
+        # Publishes that bundle as the ConfigMap the agents bootstrap from. Separate
+        # container because the SPIRE image has no kubectl.
+        - name: bundle-publisher
+          image: bitnami/kubectl:1.31
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while :; do
+                if [ -s /run/spire/bundle/bundle.crt ]; then
+                  kubectl -n spire create configmap spire-bundle \
+                    --from-file=bundle.crt=/run/spire/bundle/bundle.crt \
+                    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+                fi
+                sleep 60
+              done
+          volumeMounts: [{name: bundle, mountPath: /run/spire/bundle, readOnly: true}]
+      volumes:
+        - {name: config, configMap: {name: spire-server}}
+        - {name: sockets, emptyDir: {}}
+        - {name: bundle, emptyDir: {}}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: {requests: {storage: 1Gi}}

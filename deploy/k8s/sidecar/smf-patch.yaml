@@ -1,0 +1,38 @@
+# Adds the n4dtls sidecar to the SMF Deployment. The NF container is not listed here and is
+# therefore untouched: same image, same config, same command.
+#
+#   kubectl -n core patch deploy <smf> --patch-file deploy/k8s/sidecar/smf-patch.yaml
+#
+# Set -peer to the UPF's N4 address (the address its PFCP socket is bound to) and -peer-id /
+# -identity to the SPIFFE IDs the registrar created.
+spec:
+  template:
+    spec:
+      containers:
+        - name: n4dtls
+          image: ghcr.io/chanuk-park/dtls-sidecar:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - -role=client
+            - -peer=10.100.50.241:8806
+            - -peer-id=spiffe://5gc.example.com/ns/core/nf/upf
+            - -identity=spiffe://5gc.example.com/ns/core/nf/smf
+            - -nfqueue=62
+            - -tun=n4dtls0
+            - -install-nfq-rule
+            - -dport=8805
+            - -mtu=1200
+          env:
+            - name: CIRRUS_SPIRE_SOCKET
+              value: unix:///run/spire/sockets/agent.sock
+          securityContext:
+            privileged: true
+            capabilities: {add: ["NET_ADMIN", "NET_RAW"]}
+          volumeMounts:
+            - {name: spire-agent-socket, mountPath: /run/spire/sockets, readOnly: true}
+            - {name: dev-net-tun, mountPath: /dev/net/tun}
+      volumes:
+        - name: spire-agent-socket
+          hostPath: {path: /run/spire/sockets, type: Directory}
+        - name: dev-net-tun
+          hostPath: {path: /dev/net/tun, type: CharDevice}
