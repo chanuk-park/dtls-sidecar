@@ -187,6 +187,13 @@ var _ = syscall.AF_INET // keep syscall referenced for build parity across toolc
 //
 // The sidecar's own traffic is exempted by owner match, or it would redirect its own delivery
 // back into itself.
+// redirectPeer, when set, is the far network function's N4 ADDRESS. Matching on it catches
+// everything the local NF sends to its peer regardless of ports, which port matching cannot:
+// a core that answers from an ephemeral socket rather than from 8805 produces replies with
+// neither --sport 8805 nor --dport 8805, so they escape the redirect and leave in plaintext
+// while the request direction still looks healthy.
+var redirectPeer string
+
 func installRedirectRules(dport, toPort int) error {
 	for _, r := range redirectRuleSet("-A", dport, toPort) {
 		if out, err := exec.Command("iptables", r...).CombinedOutput(); err != nil {
@@ -248,7 +255,7 @@ func redirectRuleSet(op string, dport, toPort int) [][]string {
 	// root too, so a uid-owner exemption exempts the very traffic we are here to intercept
 	// (observed: every datagram bypassed the proxy and went straight out).
 	mk := fmt.Sprintf("%#x", proxyMark)
-	return [][]string{
+	rules := [][]string{
 		// NOTRACK on what we deliver. nat rules only run for the FIRST packet of a
 		// connection, so if our delivered datagram creates conntrack state, the network
 		// function's REPLY counts as that flow's reply direction and skips nat OUTPUT
@@ -259,6 +266,13 @@ func redirectRuleSet(op string, dport, toPort int) [][]string {
 		{"-t", "nat", op, "OUTPUT", "-p", "udp", "--dport", p, "-j", "REDIRECT", "--to-ports", t},
 		{"-t", "nat", op, "OUTPUT", "-p", "udp", "--sport", p, "-j", "REDIRECT", "--to-ports", t},
 	}
+	if redirectPeer != "" {
+		rules = append(rules, []string{
+			"-t", "nat", op, "OUTPUT", "-p", "udp", "-d", redirectPeer,
+			"-j", "REDIRECT", "--to-ports", t,
+		})
+	}
+	return rules
 }
 
 // --- datapath loops -------------------------------------------------------------------------

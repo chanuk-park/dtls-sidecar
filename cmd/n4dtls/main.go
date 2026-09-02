@@ -58,6 +58,11 @@ func main() {
 	listenProxy := flag.String("proxy-listen", "0.0.0.0:18805", "socket mode: where the REDIRECT rule lands datagrams")
 	peerN4 := flag.String("peer-n4", "", "socket mode, CP side: the far network function's N4 address host:port. "+
 		"Leave empty on the UP side, where replies go back to whoever the CP last sent from.")
+	redirectPeerFlag := flag.String("redirect-peer", "", "the far network function's N4 ADDRESS "+
+		"(no port). Adds a rule that redirects everything the local NF sends to it, whatever "+
+		"ports are involved -- necessary for cores that answer from an ephemeral socket instead "+
+		"of from the PFCP port, whose replies otherwise escape the port-matched rules and leave "+
+		"in plaintext. Set it on BOTH sides: on the CP name the UP's N4 address and vice versa.")
 	localNF := flag.String("local-nf", "", "socket mode: this side's network function N4 address (delivery target)")
 	installRules := flag.Bool("install-nfq-rule", false, "install the mangle OUTPUT accept-mark + NFQUEUE rules and remove them on exit")
 	flag.Parse()
@@ -126,6 +131,7 @@ func main() {
 				die("-local-nf: " + perr.Error())
 			}
 		}
+		redirectPeer = *redirectPeerFlag
 		if px, err = newProxy(lp, pn, ln); err != nil {
 			die("proxy: " + err.Error())
 		}

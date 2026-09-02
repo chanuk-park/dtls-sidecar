@@ -38,6 +38,27 @@ Run an agent matching your `spire-api-sdk` (1.11.x with sdk v1.11.2).
 
 ## Datapath
 
+**Requests are tunneled and sessions even establish, but `captured`/`sent` stay 0 on the peer
+sidecar — the reply direction is leaving in PLAINTEXT**
+Work through it in this order, on the side whose counters are 0:
+
+```sh
+iptables -t nat -L OUTPUT -v -n | grep REDIRECT   # missing?  the netns changed under you
+                                                  # present, counters 0? keep going
+conntrack -L -p udp | grep 8805                   # ASSURED entry? stale state, flush it
+ss -unp | grep 8805                               # replies from an EPHEMERAL socket?
+```
+
+The last one is the case port matching cannot fix: a core that answers from an ephemeral
+socket produces replies carrying neither `--sport 8805` nor `--dport 8805`, so they escape
+both rules for good. Pass `-redirect-peer <the other NF's N4 address>` on both sides, which
+adds a rule matching everything addressed to the peer regardless of port.
+
+Note that the session can still come up in this state, because both directions are delivered
+— one of them just is not encrypted. A working UE session is NOT evidence that the tunnel is
+carrying both directions; check the counters on both sidecars.
+
+
 **After a peer restart the tunnel never recovers: `sent` climbs, `recv` stays 0, and the
 peer sidecar shows only its listen line**
 A DTLS session over UDP does not fail loudly when the far side goes away — writes still
