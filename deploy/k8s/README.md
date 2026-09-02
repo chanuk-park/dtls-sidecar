@@ -9,47 +9,62 @@ spire/    SPIRE server (StatefulSet) + agent (DaemonSet) + per-NF registration
 sidecar/  the patches that add the n4dtls container to the SMF and UPF Deployments
 ```
 
-## 1. Identity infrastructure
+## 1. Identity — use the SPIRE you already have
+
+If a SPIRE agent is already running on your nodes, **use it**. That is what a SPIFFE workload
+does: it mounts the node agent's Workload API socket and receives an SVID because an entry
+exists for it. Do not apply a second SPIRE alongside one that is running — `kubectl apply`
+overwrites same-named ConfigMaps and DaemonSets and will take the existing one down.
+
+Read the three facts you need from the running install:
 
 ```sh
-kubectl apply -f deploy/k8s/spire/
-kubectl -n n4dtls-spire rollout status statefulset/spire-server
-kubectl -n n4dtls-spire rollout status daemonset/spire-agent
+kubectl -n <spire-ns> get cm spire-agent -o jsonpath='{.data.agent\.conf}' \
+  | grep -E 'trust_domain|socket_path|cluster'
+kubectl -n <spire-ns> get ds spire-agent \
+  -o jsonpath='{range .spec.template.spec.volumes[*]}{.name}: {.hostPath.path}{"\n"}{end}'
 ```
 
-> **Check for an existing SPIRE first.** These manifests use their own namespace
-> (`n4dtls-spire`) and their own cluster-scoped names (`n4dtls-spire-server`,
-> `n4dtls-spire-agent`) precisely so they cannot collide with one already in the cluster —
-> `kubectl apply` silently *overwrites* same-named ConfigMaps and DaemonSets, which will
-> break a running SPIRE. If you already run SPIRE, use it instead of these manifests: create
-> the two registration entries from `spire/13-registrar-config.yaml` against your own server
-> and point the sidecar at your agent's socket path.
+You need an agent on **every node that runs an NF**. An agent DaemonSet pinned to a subset of
+nodes will leave the sidecar on the other nodes without an identity:
 
-* **server** — StatefulSet with a PVC. Node attestation is `k8s_psat`: agents authenticate
-  with a projected service-account token, so there are no join tokens to distribute and an
-  agent restart re-attests by itself.
-* **registrar / bundle-publisher** — sidecars in the server pod. The registrar creates one
-  entry per network function; the publisher writes the trust bundle to a ConfigMap the
-  agents bootstrap from. Both are in the server pod because they need the server's socket,
-  and an `emptyDir` cannot be shared across pods.
-* **agent** — DaemonSet, `hostPID` + `hostNetwork` (it resolves caller PIDs and talks to
-  the kubelet). Its Workload API socket is a `hostPath`, which is how one agent per node
-  serves every pod on that node. `nodes/proxy` is granted in RBAC — without it the k8s
-  workload attestor gets `403 Forbidden`.
-
-Point it at your core before applying, in `spire/13-registrar-config.yaml`:
-
-```yaml
-TRUST_DOMAIN: "5gc.example.com"
-NF_NAMESPACE: "core"
-SMF_SERVICE_ACCOUNT: "oai-smf"
-UPF_SERVICE_ACCOUNT: "oai-upf"
-SIDECAR_CONTAINER: "n4dtls"
+```sh
+kubectl -n <spire-ns> get ds spire-agent -o jsonpath='{.spec.template.spec.nodeSelector}'
 ```
 
-The entries select on `k8s:ns` + `k8s:sa` + `k8s:container-name`, so the SVID is issued
-because the requester is *that container in that pod* — not because it happens to be root
-on the node.
+Then create one entry per NF. Parent them to a **node alias**, not to a specific agent: an
+agent's SPIFFE ID contains its node UID, so an entry parented to one agent only works on
+that node.
+
+```sh
+TD=<your trust domain>; CLUSTER=<your k8s_psat cluster name>
+S=/opt/spire/bin/spire-server
+
+# a parent every agent in the cluster satisfies
+kubectl -n <spire-ns> exec deploy/spire-server -- $S entry create -node \
+  -parentID "spiffe://$TD/spire/server" \
+  -spiffeID "spiffe://$TD/k8s/$CLUSTER/node" \
+  -selector "k8s_psat:cluster:$CLUSTER"
+
+# one identity per NF, bound to the SIDECAR container in that NF's pod
+for nf in smf upf; do
+  kubectl -n <spire-ns> exec deploy/spire-server -- $S entry create \
+    -parentID "spiffe://$TD/k8s/$CLUSTER/node" \
+    -spiffeID "spiffe://$TD/ns/core/nf/$nf" \
+    -selector "k8s:ns:core" -selector "k8s:sa:oai-$nf" \
+    -selector "k8s:container-name:n4dtls" -x509SVIDTTL 3600
+done
+```
+
+`k8s:container-name:n4dtls` is what separates the sidecar's identity from any entry the NF
+itself already has. A workload can match several entries, so the sidecar is told which one to
+present with `-identity`.
+
+### If you have no SPIRE at all
+
+`deploy/k8s/spire/` stands one up in its own namespace (`n4dtls-spire`, cluster-scoped names
+prefixed to match) so it cannot collide with anything. It is a starting point, not a
+production SPIRE.
 
 ## 2. The sidecar, in the NF pods
 
