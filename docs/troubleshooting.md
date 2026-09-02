@@ -38,6 +38,20 @@ Run an agent matching your `spire-api-sdk` (1.11.x with sdk v1.11.2).
 
 ## Datapath
 
+**After a peer restart the tunnel never recovers: `sent` climbs, `recv` stays 0, and the
+peer sidecar shows only its listen line**
+A DTLS session over UDP does not fail loudly when the far side goes away — writes still
+succeed locally and reads simply never return — so an error-driven supervisor never wakes.
+The sidecar now infers it: if datagrams have been sent and nothing has come back for longer
+than `deadAfter` (20s, comfortably above the PFCP heartbeat interval), the session is treated
+as lost and re-established. If you are on an older build, restart the CLIENT side (the one
+with `-peer`) to force a fresh handshake.
+
+Related operational note: bring the **server side up first**. The client dials on startup, so
+starting it against a peer that is about to restart leaves it attached to a session that is
+about to die.
+
+
 **One direction flows, the other does not: `captured` climbs on one sidecar, stays 0 on the
 other, and plaintext PFCP is still on the wire**
 Stale conntrack. nat rules run only for the first packet of a connection, and the redirect

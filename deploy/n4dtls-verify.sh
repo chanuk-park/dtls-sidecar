@@ -27,17 +27,30 @@ PASS=0; FAIL=0
 # The sidecar may run as a container in the NF's pod (Envoy model) or as a systemd unit on
 # the host. Read its log from wherever it actually is.
 SIDECAR="n4dtls"
+# Reads the sidecar's log from wherever it actually runs, and says which source it used.
+# Falling back silently is dangerous: a host unit that is no longer running still has a
+# journal, so a stale log from an earlier experiment reads exactly like a live deployment
+# (observed: results from a different trust domain reported as if they were this one).
+SIDECAR_SOURCE=""
 sidecar_log() { # $1=smf|upf
-  local pod
+  local pod unit host
   pod=$(k get pod --no-headers 2>/dev/null | awk '$3~/Running/' | grep -iE "$1" | awk '{print $1}' | head -1)
   if [ -n "$pod" ] && k get pod "$pod" -o jsonpath='{.spec.containers[*].name}' 2>/dev/null | grep -qw "$SIDECAR"; then
+    SIDECAR_SOURCE="pod $pod container $SIDECAR"
     k logs "$pod" -c "$SIDECAR" --tail=400 2>/dev/null
     return
   fi
   case "$1" in
-    smf) on "$SMF_HOST" "journalctl -u armb-smf --no-pager -n 400" 2>/dev/null;;
-    upf) on "$UPF_HOST" "journalctl -u armb-upf --no-pager -n 400" 2>/dev/null;;
+    smf) unit=armb-smf; host="$SMF_HOST";;
+    upf) unit=armb-upf; host="$UPF_HOST";;
   esac
+  # Only trust a host unit that is actually running.
+  if [ "$(on "$host" "systemctl is-active $unit" 2>/dev/null)" = "active" ]; then
+    SIDECAR_SOURCE="host unit $unit on $host"
+    on "$host" "journalctl -u $unit --no-pager -n 400" 2>/dev/null
+    return
+  fi
+  SIDECAR_SOURCE="NONE"
 }
 ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
@@ -50,6 +63,15 @@ SMF_CID=$(k get pod "$SMF_POD" -o jsonpath='{.status.containerStatuses[0].contai
 SMF_PID=$(on "$SMF_HOST" "crictl inspect $SMF_CID" | python3 -c 'import json,sys;print(json.load(sys.stdin)["info"]["pid"])')
 N4IF=$(on "$SMF_HOST" "nsenter -t $SMF_PID -n ip -o -4 addr show 2>/dev/null" | awk '{print $2, $4}' | grep -viE '^(lo|eth0) ' | awk '{print $1}' | head -1)
 echo "target: SMF=$SMF_POD UPF=$UPF_POD n4if=$N4IF"
+
+echo "== 0. where the sidecar is =="
+sidecar_log smf >/dev/null
+if [ "$SIDECAR_SOURCE" = "NONE" ]; then
+  bad "no running sidecar found for the SMF (no $SIDECAR container in its pod, no active host unit)"
+  echo "     nothing below would describe this deployment; stopping."
+  echo; echo "== result: $PASS passed, $FAIL failed =="; exit 1
+fi
+ok "sidecar source: $SIDECAR_SOURCE"
 
 echo "== 1. mutual-auth DTLS session =="
 S=$(sidecar_log smf | grep -oE 'auth=x509-svid\+mutual cipher=[^ ]+ handshakes=[0-9]+' | tail -1)

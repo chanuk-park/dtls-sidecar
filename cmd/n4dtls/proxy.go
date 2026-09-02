@@ -36,6 +36,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -57,6 +58,20 @@ const frameHeaderLen = 12
 
 // proxyMark tags datagrams this sidecar delivers, so the redirect rules skip them.
 const proxyMark = 0x4e35
+
+// livenessPoll is how often the receiver wakes to judge liveness; deadAfter is how long a
+// one-way session is tolerated. deadAfter must exceed the peer's own retransmission window
+// (PFCP heartbeats are seconds apart) or a slow peer would be mistaken for a dead one.
+const (
+	livenessPoll = 3 * time.Second
+	deadAfter    = 20 * time.Second
+)
+
+// isTimeout reports whether err is a read deadline expiring rather than a real failure.
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
 
 func encodeFrame(dst []byte, src, to netip.AddrPort, payload []byte) []byte {
 	buf := dst[:0]
@@ -282,21 +297,43 @@ func proxySender(ctx context.Context, h *connHolder, px *proxy) {
 // function with the original source address.
 func proxyReceiver(ctx context.Context, h *connHolder, px *proxy) {
 	buf := make([]byte, 65535)
+	// A DTLS session over UDP does not fail loudly when the peer goes away: writes still
+	// succeed locally and reads simply never return. The supervisor is driven by errors, so
+	// without this the sidecar sends into a dead session forever -- observed after a peer
+	// restart as sent climbing while recv stayed at 0, with no reconnect. Liveness is
+	// therefore inferred: if we have sent something and nothing has come back for longer
+	// than deadAfter, the session is one-way and is treated as lost.
+	lastRecv := time.Now()
+	sentAtLastRecv := nSent.Load()
 	for ctx.Err() == nil {
 		conn := h.get()
 		if conn == nil {
 			time.Sleep(100 * time.Millisecond)
+			lastRecv, sentAtLastRecv = time.Now(), nSent.Load()
 			continue
 		}
+		_ = conn.SetReadDeadline(time.Now().Add(livenessPoll))
 		n, err := conn.Read(buf)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
+			if isTimeout(err) {
+				// Silence is normal between PFCP messages; silence WHILE SENDING is not.
+				if nSent.Load() > sentAtLastRecv && time.Since(lastRecv) > deadAfter {
+					logf("no reply for %s while %d datagram(s) were sent -- treating the session "+
+						"as lost and re-establishing", time.Since(lastRecv).Round(time.Second),
+						nSent.Load()-sentAtLastRecv)
+					h.fail(conn)
+					lastRecv, sentAtLastRecv = time.Now(), nSent.Load()
+				}
+				continue
+			}
 			logf("dtls read failed: %v", err)
 			h.fail(conn)
 			continue
 		}
+		lastRecv, sentAtLastRecv = time.Now(), nSent.Load()
 		src, dst, payload, derr := decodeFrame(buf[:n])
 		if derr != nil {
 			logf("proxy decode: %v", derr)

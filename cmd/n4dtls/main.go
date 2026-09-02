@@ -243,6 +243,8 @@ func senderLoop(h *connHolder) {
 // the local NF sees N4 exactly as if it arrived over the wire.
 func receiverLoop(ctx context.Context, h *connHolder, tun *tunDev) {
 	buf := make([]byte, 65535)
+	lastRecv := time.Now()
+	sentAtLastRecv := nSent.Load()
 	for {
 		if ctx.Err() != nil {
 			return
@@ -250,17 +252,31 @@ func receiverLoop(ctx context.Context, h *connHolder, tun *tunDev) {
 		conn := h.get()
 		if conn == nil {
 			time.Sleep(100 * time.Millisecond)
+			lastRecv, sentAtLastRecv = time.Now(), nSent.Load()
 			continue
 		}
+		// Same liveness rule as the socket datapath: a dead UDP peer produces neither a
+		// write error nor a read error, so a one-way session has to be inferred.
+		_ = conn.SetReadDeadline(time.Now().Add(livenessPoll))
 		n, err := conn.Read(buf)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
+			if isTimeout(err) {
+				if nSent.Load() > sentAtLastRecv && time.Since(lastRecv) > deadAfter {
+					logf("no reply for %s while %d packet(s) were sent -- re-establishing",
+						time.Since(lastRecv).Round(time.Second), nSent.Load()-sentAtLastRecv)
+					h.fail(conn)
+					lastRecv, sentAtLastRecv = time.Now(), nSent.Load()
+				}
+				continue
+			}
 			logf("dtls read failed: %v", err)
 			h.fail(conn) // the supervisor rebuilds; do not abandon the receive path
 			continue
 		}
+		lastRecv, sentAtLastRecv = time.Now(), nSent.Load()
 		if n == 0 {
 			continue
 		}
