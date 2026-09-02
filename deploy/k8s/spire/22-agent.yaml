@@ -1,8 +1,8 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: spire-agent
-  namespace: spire
+  name: n4dtls-spire-agent
+  namespace: n4dtls-spire
 spec:
   selector: {matchLabels: {app: spire-agent}}
   template:

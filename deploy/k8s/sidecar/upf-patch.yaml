@@ -32,6 +32,9 @@ spec:
             - {name: dev-net-tun, mountPath: /dev/net/tun}
       volumes:
         - name: spire-agent-socket
+          # Must match the hostPath your SPIRE agent publishes its Workload API socket on.
+          # These manifests use /run/spire/sockets; an existing SPIRE install often differs
+          # (e.g. /run/spire/agent-sockets) -- check its DaemonSet before applying.
           hostPath: {path: /run/spire/sockets, type: Directory}
         - name: dev-net-tun
           hostPath: {path: /dev/net/tun, type: CharDevice}

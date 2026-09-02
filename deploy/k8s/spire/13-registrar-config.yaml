@@ -1,7 +1,7 @@
 # Edit these to match your core, then re-apply and restart the spire-server pod.
 apiVersion: v1
 kind: ConfigMap
-metadata: {name: spire-registrar, namespace: spire}
+metadata: {name: spire-registrar, namespace: n4dtls-spire}
 data:
   TRUST_DOMAIN: "5gc.example.com"
   NF_NAMESPACE: "core"
@@ -12,7 +12,7 @@ data:
 # The bundle publisher writes the ConfigMap the agents bootstrap from.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
-metadata: {name: spire-server-bundle, namespace: spire}
+metadata: {name: spire-server-bundle, namespace: n4dtls-spire}
 rules:
   - apiGroups: [""]
     resources: ["configmaps"]
@@ -20,6 +20,6 @@ rules:
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
-metadata: {name: spire-server-bundle, namespace: spire}
+metadata: {name: spire-server-bundle, namespace: n4dtls-spire}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: spire-server-bundle}
-subjects: [{kind: ServiceAccount, name: spire-server, namespace: spire}]
+subjects: [{kind: ServiceAccount, name: spire-server, namespace: n4dtls-spire}]

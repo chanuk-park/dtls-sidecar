@@ -1,8 +1,8 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: spire-server
-  namespace: spire
+  name: n4dtls-spire-server
+  namespace: n4dtls-spire
 spec:
   selector: {app: spire-server}
   ports:
@@ -13,8 +13,8 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: spire-server
-  namespace: spire
+  name: n4dtls-spire-server
+  namespace: n4dtls-spire
 spec:
   serviceName: spire-server
   replicas: 1
@@ -55,9 +55,18 @@ spec:
               # One identity per network function, selected on the POD the sidecar runs in:
               # namespace, service account and container name. A process elsewhere on the
               # node cannot satisfy these by running a copy of the NF binary.
+              # Every agent attests as spiffe://<td>/spire/agent/k8s_psat/<cluster>/<node-uid>,
+              # so workload entries cannot name a parent directly -- the uid differs per node.
+              # A node ALIAS gives all of them one shared parent to hang workload entries off.
+              ALIAS="spiffe://${TRUST_DOMAIN}/k8s/cluster/node"
+              /opt/spire/bin/spire-server entry create -socketPath $S -node \
+                -parentID "spiffe://${TRUST_DOMAIN}/spire/server" \
+                -spiffeID "$ALIAS" \
+                -selector "k8s_psat:cluster:cluster" 2>&1 | sed "s/^/[alias] /" || true
+
               entry() { # $1=nf name  $2=service account
                 /opt/spire/bin/spire-server entry create -socketPath $S \
-                  -parentID "spiffe://${TRUST_DOMAIN}/spire/agent/k8s_psat/cluster" \
+                  -parentID "$ALIAS" \
                   -spiffeID "spiffe://${TRUST_DOMAIN}/ns/${NF_NAMESPACE}/nf/$1" \
                   -selector "k8s:ns:${NF_NAMESPACE}" \
                   -selector "k8s:sa:$2" \
@@ -84,7 +93,7 @@ spec:
             - |
               while :; do
                 if [ -s /run/spire/bundle/bundle.crt ]; then
-                  kubectl -n spire create configmap spire-bundle \
+                  kubectl -n n4dtls-spire create configmap spire-bundle \
                     --from-file=bundle.crt=/run/spire/bundle/bundle.crt \
                     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
                 fi

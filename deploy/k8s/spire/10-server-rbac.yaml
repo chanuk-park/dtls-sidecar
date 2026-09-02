@@ -1,15 +1,15 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: spire-server
-  namespace: spire
+  name: n4dtls-spire-server
+  namespace: n4dtls-spire
 ---
 # The server validates the projected service-account tokens its agents present
 # (k8s_psat node attestation), which is a TokenReview.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: spire-server
+  name: n4dtls-spire-server
 rules:
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
@@ -21,12 +21,12 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: spire-server
+  name: n4dtls-spire-server
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: spire-server
+  name: n4dtls-spire-server
 subjects:
   - kind: ServiceAccount
-    name: spire-server
-    namespace: spire
+    name: n4dtls-spire-server
+    namespace: n4dtls-spire

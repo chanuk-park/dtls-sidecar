@@ -13,9 +13,17 @@ sidecar/  the patches that add the n4dtls container to the SMF and UPF Deploymen
 
 ```sh
 kubectl apply -f deploy/k8s/spire/
-kubectl -n spire rollout status statefulset/spire-server
-kubectl -n spire rollout status daemonset/spire-agent
+kubectl -n n4dtls-spire rollout status statefulset/spire-server
+kubectl -n n4dtls-spire rollout status daemonset/spire-agent
 ```
+
+> **Check for an existing SPIRE first.** These manifests use their own namespace
+> (`n4dtls-spire`) and their own cluster-scoped names (`n4dtls-spire-server`,
+> `n4dtls-spire-agent`) precisely so they cannot collide with one already in the cluster —
+> `kubectl apply` silently *overwrites* same-named ConfigMaps and DaemonSets, which will
+> break a running SPIRE. If you already run SPIRE, use it instead of these manifests: create
+> the two registration entries from `spire/13-registrar-config.yaml` against your own server
+> and point the sidecar at your agent's socket path.
 
 * **server** — StatefulSet with a PVC. Node attestation is `k8s_psat`: agents authenticate
   with a projected service-account token, so there are no join tokens to distribute and an
