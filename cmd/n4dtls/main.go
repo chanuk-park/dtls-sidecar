@@ -18,6 +18,7 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -51,6 +52,13 @@ func main() {
 	tunName := flag.String("tun", "n4dtls0", "TUN device used to reinject peer packets")
 	mark := flag.Int("mark", 0x4e34, "fwmark for injected packets / the accept-before-queue rule (loop guard)")
 	mtu := flag.Int("mtu", 1200, "DTLS MTU (§D4: Multus MTU must be lowered to match so PFCP never fragments)")
+	mode := flag.String("mode", "socket", "datapath: socket (proxy, like Envoy: REDIRECT into a "+
+		"socket, deliver transparently -- no NFQUEUE, no TUN, no cgo) | nfqueue (packet capture "+
+		"with deferred verdicts; only needed to share an interception path with a capture-based gate)")
+	listenProxy := flag.String("proxy-listen", "0.0.0.0:18805", "socket mode: where the REDIRECT rule lands datagrams")
+	peerN4 := flag.String("peer-n4", "", "socket mode, CP side: the far network function's N4 address host:port. "+
+		"Leave empty on the UP side, where replies go back to whoever the CP last sent from.")
+	localNF := flag.String("local-nf", "", "socket mode: this side's network function N4 address (delivery target)")
 	installRules := flag.Bool("install-nfq-rule", false, "install the mangle OUTPUT accept-mark + NFQUEUE rules and remove them on exit")
 	flag.Parse()
 
@@ -74,12 +82,19 @@ func main() {
 	}
 	defer id.close()
 
-	// 2. Reinjection device.
-	tun, err := openTUN(*tunName)
-	if err != nil {
-		die("tun: " + err.Error())
+	socketMode := *mode == "socket"
+
+	// 2. Reinjection device -- only the capture datapath needs one. In socket mode delivery
+	// is a transparent UDP send, so there is no tun, no rp_filter to relax and no risk of
+	// recapturing our own injection.
+	var tun *tunDev
+	if !socketMode {
+		tun, err = openTUN(*tunName)
+		if err != nil {
+			die("tun: " + err.Error())
+		}
+		defer tun.close()
 	}
-	defer tun.close()
 
 	// 3. Establish the DTLS session FIRST. The capture rule is installed only AFTER the
 	// tunnel is up (below), so we never drop the NF's PFCP into a queue with nowhere to
@@ -92,25 +107,56 @@ func main() {
 	nHandshake.Add(1)
 	defer conn.Close()
 
-	// 4. Tunnel is up: NOW start intercepting. Same NFQUEUE binding arm A uses.
-	if *installRules {
-		if err := installNfqRules(*queueNum, *dport, *mark); err != nil {
-			die("install rules: " + err.Error())
+	// 4. Tunnel is up: NOW start intercepting.
+	var px *proxy
+	if socketMode {
+		lp, perr := netip.ParseAddrPort(*listenProxy)
+		if perr != nil {
+			die("-proxy-listen: " + perr.Error())
 		}
-		defer removeNfqRules(*queueNum, *dport, *mark)
+		var pn netip.AddrPort
+		if *peerN4 != "" {
+			if pn, perr = netip.ParseAddrPort(*peerN4); perr != nil {
+				die("-peer-n4: " + perr.Error())
+			}
+		}
+		var ln netip.Addr
+		if *localNF != "" {
+			if ln, perr = netip.ParseAddr(*localNF); perr != nil {
+				die("-local-nf: " + perr.Error())
+			}
+		}
+		if px, err = newProxy(lp, pn, ln); err != nil {
+			die("proxy: " + err.Error())
+		}
+		relaxRPFilter("lo")
+		defer px.close()
+		if *installRules {
+			if err := installRedirectRules(*dport, int(lp.Port())); err != nil {
+				die("install rules: " + err.Error())
+			}
+			defer removeRedirectRules(*dport, int(lp.Port()))
+		}
+	} else {
+		if *installRules {
+			if err := installNfqRules(*queueNum, *dport, *mark); err != nil {
+				die("install rules: " + err.Error())
+			}
+			defer removeNfqRules(*queueNum, *dport, *mark)
+		}
+		fd, ferr := nfqStart(*queueNum)
+		if ferr != nil {
+			die("nfqueue: " + ferr.Error())
+		}
+		defer nfqStop()
+		go nfqRunLoop(fd)
 	}
-	fd, err := nfqStart(*queueNum)
-	if err != nil {
-		die("nfqueue: " + err.Error())
-	}
-	defer nfqStop()
-	go nfqRunLoop(fd)
 
 	fmt.Fprintf(os.Stderr,
-		"ARMB-STATE component=n4dtls role=%s self=%s peer_id=%s identity=%s attested_pid=%d "+
+		"ARMB-STATE component=n4dtls role=%s mode=%s self=%s peer_id=%s identity=%s attested_pid=%d "+
 			"nfqueue=%d dport=%d tun=%s mtu=%d mark=%#x auth=x509-svid+mutual cipher=%s "+
 			"handshakes=%d rotation=live fail=drop payload=untouched\n",
-		*role, id.spiffe, *peerID, id.mode, *workloadPID, *queueNum, *dport, *tunName, *mtu, *mark,
+		*role, *mode, id.spiffe, *peerID, id.mode, *workloadPID, *queueNum, *dport, *tunName, *mtu, *mark,
 		fmt.Sprintf("%#x(negotiated=offered)", uint16(id.cfg.CipherSuites[0])), nHandshake.Load())
 
 	// 5. Keep the session alive for the life of the sidecar. Envoy re-establishes its
@@ -123,10 +169,14 @@ func main() {
 	h.set(conn)
 	go superviseSession(ctx, h, id, *role, *peer, *listen)
 
-	// 6. Sender: captured egress IP packet -> DTLS -> DROP the original.
-	go senderLoop(h)
-	// 7. Receiver: DTLS record -> reinject on the local input path.
-	go receiverLoop(ctx, h, tun)
+	// 6/7. Sender and receiver, per datapath.
+	if socketMode {
+		go proxySender(ctx, h, px)
+		go proxyReceiver(ctx, h, px)
+	} else {
+		go senderLoop(h)
+		go receiverLoop(ctx, h, tun)
+	}
 
 	// periodic counters (I5 raw counts; I8 params already logged above)
 	tick := time.NewTicker(10 * time.Second)

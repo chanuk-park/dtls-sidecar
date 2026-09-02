@@ -55,15 +55,7 @@ func openTUN(name string) (*tunDev, error) {
 	// subnet arriving on the "wrong" interface (verified: only 0 delivers). We therefore set
 	// conf/all/rp_filter=0 in THIS netns (the NF's own netns) and the tun's, and log both so
 	// the setting is on the record (§2 D2 / I8).
-	setRP := func(path, v string) {
-		if err := os.WriteFile(path, []byte(v), 0o644); err != nil {
-			fmt.Fprintf(os.Stderr, "n4dtls: WARN could not set %s=%s: %v (injected packets may be rp_filter-dropped)\n", path, v, err)
-		} else {
-			fmt.Fprintf(os.Stderr, "n4dtls: rp_filter %s=%s\n", path, v)
-		}
-	}
-	setRP("/proc/sys/net/ipv4/conf/all/rp_filter", "0")
-	setRP("/proc/sys/net/ipv4/conf/"+name+"/rp_filter", "0")
+	relaxRPFilter(name)
 	return &tunDev{f: f, name: name}, nil
 }
 
@@ -95,5 +87,27 @@ func (t *tunDev) inject(ip []byte) (int, error) { return t.f.Write(ip) }
 func (t *tunDev) close() {
 	if t != nil && t.f != nil {
 		t.f.Close()
+	}
+}
+
+
+// relaxRPFilter disables reverse-path filtering for delivered/injected packets. They carry the
+// PEER's source address, whose route is the real N4 interface rather than the one they arrive
+// on, so a strict filter drops them silently -- the single most common reason a working tunnel
+// appears to deliver nothing. The effective value is max(conf/all, conf/<iface>), so conf/all
+// has to be relaxed as well; loose mode (2) is not enough here, only 0.
+func relaxRPFilter(ifaces ...string) {
+	set := func(path string) {
+		if err := os.WriteFile(path, []byte("0"), 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "n4dtls: WARN could not set %s=0: %v (delivered packets may be rp_filter-dropped)\n", path, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "n4dtls: rp_filter %s=0\n", path)
+		}
+	}
+	set("/proc/sys/net/ipv4/conf/all/rp_filter")
+	for _, n := range ifaces {
+		if n != "" {
+			set("/proc/sys/net/ipv4/conf/" + n + "/rp_filter")
+		}
 	}
 }
